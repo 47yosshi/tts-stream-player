@@ -1,0 +1,17 @@
+{
+    "name": "tts-stream-player",
+    "version": "0.1.0",
+    "description": "Streaming TTS audio playback for the browser via Web Audio API",
+    "license": "MIT",
+    "main": "dist/index.cjs",
+    "module": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+      "build": "tsup",
+      "dev": "tsup --watch"
+    },
+    "devDependencies": {
+      "tsup": "^8.5.1",
+      "typescript": "^5.9.3"
+    }
+}

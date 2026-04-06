@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>tts-stream-player demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; }
+    input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; margin: 4px 0 12px; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: 12px 24px; font-size: 16px; cursor: pointer; margin: 8px 4px; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    .result { margin-top: 12px; font-size: 14px; color: #555; min-height: 24px; }
+    .time { font-size: 28px; font-weight: bold; margin: 8px 0; }
+    .section { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; }
+    h2 { margin-top: 0; }
+    label { font-size: 13px; color: #555; }
+  </style>
+</head>
+<body>
+
+<h1>TTS Streaming comparison</h1>
+<p>Measures time from button click to first audio playback.</p>
+
+<div class="section">
+  <h2>Settings</h2>
+  <label>ElevenLabs API Key</label>
+  <input id="api-key" type="password" placeholder="your-api-key-here"/>
+  <label>Voice ID</label>
+  <input id="voice-id" type="text" placeholder="your-voice-id-here"/>
+  <label>Text</label>
+  <input id="text" type="text" value="Hello. This is a streaming playback test. I'm comparing the time it takes for the initial audio to start playing." />
+  <button id="unlock-btn">▶ Start</button>
+  <span id="unlock-status" style="color:#888;font-size:14px;margin-left:8px">Click to initialize audio</span>
+</div>
+
+<div class="section">
+  <h2>With streaming</h2>
+  <p>Plays each PCM chunk as it arrives.</p>
+  <button id="stream-btn" disabled>Play (streaming)</button>
+  <div class="result">
+    <div class="time" id="stream-time">—</div>
+    <div id="stream-status"></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Without streaming</h2>
+  <p>Waits for full audio before playback.</p>
+  <button id="full-btn" disabled>Play (full)</button>
+  <div class="result">
+    <div class="time" id="full-time">—</div>
+    <div id="full-status"></div>
+  </div>
+</div>
+
+<script type="module">
+import { TTSStreamPlayer } from '../dist/index.mjs'
+
+const player = new TTSStreamPlayer(
+    { sampleRate: 16000 }    // Sampling 16kHz
+)
+
+const getSettings = () => ({
+  apiKey: document.getElementById('api-key').value.trim(),
+  voiceId: document.getElementById('voice-id').value.trim(),
+  text: document.getElementById('text').value.trim(),
+})
+
+document.getElementById('unlock-btn').addEventListener('click', async () => {
+  await player.unlock()
+  document.getElementById('unlock-status').textContent = '✅ Audio initialized'
+  document.getElementById('stream-btn').disabled = false
+  document.getElementById('full-btn').disabled = false
+  document.getElementById('unlock-btn').disabled = true
+})
+
+document.getElementById('stream-btn').addEventListener('click', async () => {
+  const { apiKey, voiceId, text } = getSettings()
+  const btn = document.getElementById('stream-btn')
+  const timeEl = document.getElementById('stream-time')
+  const statusEl = document.getElementById('stream-status')
+
+  btn.disabled = true
+  timeEl.textContent = '...'
+  statusEl.textContent = 'Fetching...'
+
+  const t0 = performance.now()
+
+  const res = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=pcm_16000`,
+    {
+      method: 'POST',
+      headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
+    }
+  )
+
+  const session = await player.play(res.body)
+
+  session.on('start', () => {
+    timeEl.textContent = `${Math.round(performance.now() - t0)} ms`
+    statusEl.textContent = '🔊 Playing'
+  })
+  session.on('end', () => {
+    statusEl.textContent = '✅ Done'
+    btn.disabled = false
+  })
+})
+
+document.getElementById('full-btn').addEventListener('click', async () => {
+  const { apiKey, voiceId, text } = getSettings()
+  const btn = document.getElementById('full-btn')
+  const timeEl = document.getElementById('full-time')
+  const statusEl = document.getElementById('full-status')
+
+  btn.disabled = true
+  timeEl.textContent = '...'
+  statusEl.textContent = 'Fetching (waiting for full audio)...'
+
+  const t0 = performance.now()
+
+  const res = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_16000`,
+    {
+      method: 'POST',
+      headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
+    }
+  )
+  const buf = await res.arrayBuffer()
+
+  console.log('Content-Type:', res.headers.get('content-type'))
+  console.log('Status:', res.status)
+  console.log('Byte Length:', buf.byteLength)
+
+  const ctx = new AudioContext({ sampleRate: 16000 })
+  const int16 = new Int16Array(buf)
+  const float32 = new Float32Array(int16.length)
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+
+  const audioBuf = ctx.createBuffer(1, float32.length, 16000)
+  audioBuf.copyToChannel(float32, 0)
+
+  const src = ctx.createBufferSource()
+  src.buffer = audioBuf
+  src.connect(ctx.destination)
+
+  timeEl.textContent = `${Math.round(performance.now() - t0)} ms`
+  statusEl.textContent = '🔊 Playing'
+  src.start()
+  src.onended = () => {
+    statusEl.textContent = '✅ Done'
+    btn.disabled = false
+  }
+})
+</script>
+</body>
+</html>
