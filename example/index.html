@@ -100,6 +100,9 @@ document.getElementById('stream-btn').addEventListener('click', async () => {
     timeEl.textContent = `${Math.round(performance.now() - t0)} ms`
     statusEl.textContent = '🔊 Playing'
   })
+  session.on('buffering', () => {
+    console.log("buffering...")
+  })
   session.on('end', () => {
     statusEl.textContent = '✅ Done'
     btn.disabled = false

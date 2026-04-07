@@ -2,7 +2,8 @@ import { Session } from './session'
 
 export interface PlayerOptions {
   sampleRate: number
-  channels?: number  // default: 1
+  channels?: number     // default: 1
+  minBufferMs?: number  // default: 100
 }
 
 export class TTSStreamPlayer {
@@ -12,6 +13,7 @@ export class TTSStreamPlayer {
   constructor(options: PlayerOptions) {
     this.options = {
       channels: 1,
+      minBufferMs: 100,
       ...options,
     }
   }
@@ -29,7 +31,12 @@ export class TTSStreamPlayer {
     if (!this.ctx) {
       throw new Error('Call unlock() before play()')
     }
-    const session = new Session(this.ctx, stream, this.options.channels)
+    const session = new Session(
+      this.ctx,
+      stream,
+      this.options.channels,
+      this.options.minBufferMs,
+    )
     session.start()
     return session
   }
