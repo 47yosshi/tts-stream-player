@@ -1,4 +1,4 @@
-import { decodePCM } from './decoder'
+import { decodePCM, extractCompleteFrames, type AudioFormat } from './decoder'
 import { Scheduler } from './scheduler'
 import { BufferQueue } from './queue'
 
@@ -16,6 +16,7 @@ export class Session {
     private stream: ReadableStream<Uint8Array>,
     private channels: number,
     minBufferMs: number,
+    private format: AudioFormat = 'pcm_16bit',
   ) {
     const minBufferSeconds = minBufferMs / 1000
     this.queue = new BufferQueue(minBufferSeconds)
@@ -34,10 +35,11 @@ export class Session {
   }
 
   async start(): Promise<void> {
-    await Promise.all([this.produceLoop(), this.consumeLoop()])
+    const produce = this.format === 'mp3' ? this.produceLoopMP3() : this.produceLoopPCM()
+    await Promise.all([produce, this.consumeLoop()])
   }
 
-  private async produceLoop(): Promise<void> {
+  private async produceLoopPCM(): Promise<void> {
     const reader = this.stream.getReader()
     try {
       while (!this.aborted) {
@@ -65,6 +67,57 @@ export class Session {
     }
   }
 
+  private async produceLoopMP3(): Promise<void> {
+    const reader = this.stream.getReader()
+    let accumulated = new Uint8Array(0)
+
+    try {
+      while (!this.aborted) {
+        const { value, done } = await reader.read()
+
+        if (value) {
+          accumulated = concat(accumulated, value)
+        }
+
+        const { framesData, remainder } = extractCompleteFrames(accumulated)
+        accumulated = remainder
+
+        if (framesData) {
+          // decodeAudioData はバッファを neuterize するため slice でコピーを渡す
+          const arrayBuffer = (framesData.buffer as ArrayBuffer).slice(
+            framesData.byteOffset,
+            framesData.byteOffset + framesData.byteLength,
+          )
+          try {
+            const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer)
+            if (!this.aborted) this.queue.push(audioBuffer)
+          } catch {
+            // 無効データは無視して続行
+          }
+        }
+
+        if (done) break
+      }
+
+      // ストリーム終端: 残留バイトをフラッシュ
+      if (!this.aborted && accumulated.byteLength > 0) {
+        const arrayBuffer = (accumulated.buffer as ArrayBuffer).slice(
+          accumulated.byteOffset,
+          accumulated.byteOffset + accumulated.byteLength,
+        )
+        try {
+          const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer)
+          this.queue.push(audioBuffer)
+        } catch {
+          // 無視
+        }
+      }
+    } finally {
+      reader.releaseLock()
+      this.queue.close()
+    }
+  }
+
   private async consumeLoop(): Promise<void> {
     // 初期バッファリング: minBufferMs 分溜まるまで待ってから再生開始
     await this.queue.waitForMinBuffer()
@@ -84,7 +137,6 @@ export class Session {
 
       // キューが空でストリームは継続中
       if (this.scheduler.isUnderflowed()) {
-        console.log("under...flowed!")
         // 音声が実際に途切れた → アンダーフロー
         this.handlers.get('buffering')?.()
         await this.queue.waitForMinBuffer()
@@ -92,7 +144,6 @@ export class Session {
           this.handlers.get('playing')?.()
         }
       } else {
-        console.log("wait for any!")
         // スケジュール済み音声はまだある → ネットワーク遅延の吸収待ち
         await this.queue.waitForAny()
       }
@@ -102,7 +153,7 @@ export class Session {
   }
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(a.byteLength + b.byteLength)
   out.set(a, 0)
   out.set(b, a.byteLength)

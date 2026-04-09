@@ -2,25 +2,31 @@
 
 A minimal browser library for streaming TTS audio playback via the Web Audio API.
 
-Bridges the gap between TTS API responses (chunked transfer encoding) and the browser speaker — the part that SDKs like ElevenLabs and OpenAI leave unimplemented on the client side.
+Bridges the gap between TTS API responses (HTTP using chunked transfer encoding) and the browser speaker.
 
-## Overview
+Without tts-stream-player:  wait = total generation time
+With    tts-stream-player:  wait = TTFB (~100–500ms)
 
-Cloud TTS APIs stream audio over HTTP using chunked transfer encoding. Without streaming playback, the browser must wait for the entire audio to be generated before it starts playing — adding 5–10 seconds of silence in a typical 400-character response.
+## Format support
+-  PCM 16-bit
+-  MP3
 
-With `tts-stream-player`, the first audio chunk plays within ~100–500ms of the API response starting.
-
-![processing flow](./assets/tool_flow.png)
+## Who is this for
+- **Separate LLM and TTS** — you own the full pipeline (your LLM, your RAG, your prompt logic) and just want HTTP streaming playback in the browser
+- **Custom or self-hosted TTS** — your TTS engine doesn't support WebRTC
+- **Cost-conscious teams** — ElevenLabs TTS API is cheaper per minute than Conversational AI; this library gives you streaming playback without paying for WebRTC infrastructure
 
 ## Features
 
-- PCM 16-bit streaming playback via Web Audio API
+- PCM 16-bit and MP3 streaming playback via Web Audio API
 - Seamless chunk scheduling (no gaps between chunks)
 - Time-based buffer queue for absorbing network jitter
 - Underflow recovery — automatically rebuffers and resumes after network stalls
 - Safari autoplay unlock helper
 - Per-session `start` / `end` / `buffering` event hooks
 - Session cancellation and global interrupt
+
+![processing flow](./assets/tool_flow.png)
 
 ## Installation
 
@@ -66,11 +72,14 @@ micButton.addEventListener('click', () => {
 
 ### `new TTSStreamPlayer(options)`
 
-| Option | Type | Required | Description |
-|---|---|---|---|
-| `sampleRate` | `number` | yes | Sample rate of the PCM stream (e.g. `16000`, `24000`) |
-| `channels` | `number` | no | Number of channels. Default: `1` |
-| `minBufferMs` | `number` | no | Milliseconds of audio to buffer before playback starts (and before resuming after underflow). Default: `100` |
+
+| Option        | Type                  | Required | Description                                                                                                       |
+| ------------- | --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| `sampleRate`  | `number`              | yes      | Sample rate for the `AudioContext`. For PCM, must match the stream. For MP3, the browser resamples automatically. |
+| `channels`    | `number`              | no       | Number of channels. Default: `1`. Ignored for MP3 (taken from the stream).                                        |
+| `minBufferMs` | `number`              | no       | Milliseconds of audio to buffer before playback starts (and before resuming after underflow). Default: `100`      |
+| `format`      | `'pcm_16bit' | 'mp3'` | no       | Audio format of the stream. Default: `'pcm_16bit'`                                                                |
+
 
 ### `player.unlock(): Promise<void>`
 
@@ -86,19 +95,22 @@ Suspends audio output. The `AudioContext` remains alive and can be resumed.
 
 ### `session.on(event, handler): this`
 
-| Event | When |
-|---|---|
-| `start` | First chunk has been scheduled for playback |
+
+| Event       | When                                             |
+| ----------- | ------------------------------------------------ |
+| `start`     | First chunk has been scheduled for playback      |
 | `buffering` | Buffer exhausted mid-stream; waiting to rebuffer |
-| `playing` | Rebuffering complete; playback has resumed |
-| `end` | Stream has ended or session was cancelled |
+| `playing`   | Rebuffering complete; playback has resumed       |
+| `end`       | Stream has ended or session was cancelled        |
+
 
 ### `session.cancel(): void`
 
 Cancels this session and suspends the `AudioContext`.
 
+## Formats
 
-## PCM format
+### PCM (default)
 
 Supports **16-bit signed PCM** (little-endian), the default output format of ElevenLabs (`pcm_16000`, `pcm_22050`, `pcm_24000`) and OpenAI TTS (`pcm`).
 
@@ -108,14 +120,8 @@ Make sure the `sampleRate` option matches the format requested from the API.
 // ElevenLabs example — request PCM at 16kHz
 const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/{id}/stream?output_format=pcm_16000', {
   method: 'POST',
-  headers: {
-    'xi-api-key': API_KEY,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    text: 'Hello.',
-    model_id: 'eleven_flash_v2_5',
-  }),
+  headers: { 'xi-api-key': API_KEY, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ text: 'Hello.', model_id: 'eleven_flash_v2_5' }),
 })
 
 const player = new TTSStreamPlayer({ sampleRate: 16000 })
@@ -123,21 +129,36 @@ await player.unlock()
 await player.play(response.body)
 ```
 
+### MP3
+
+Supports **MPEG1/2/2.5 Layer III** streaming. Incoming bytes are parsed frame-by-frame using the MP3 frame header, and each batch of complete frames is decoded via `AudioContext.decodeAudioData()`.
+
+```typescript
+// OpenAI TTS example — MP3 output
+const response = await fetch('https://api.openai.com/v1/audio/speech', {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ model: 'tts-1', voice: 'alloy', input: 'Hello.', response_format: 'mp3' }),
+})
+
+const player = new TTSStreamPlayer({ sampleRate: 44100, format: 'mp3' })
+await player.unlock()
+await player.play(response.body)
+```
+
+> **Note:** Because `decodeAudioData` is called per frame batch, there may be a brief encoder-delay gap (~13 ms) at each batch boundary. For seamless MP3 streaming a WASM decoder (e.g. minimp3) is needed; this implementation keeps zero dependencies.
+
 ## Browser support
 
 Requires Web Audio API support.
 
-| Browser | Support |
-|---|---|
-| Chrome | ✅ |
-| Firefox | ✅ |
-| Edge | ✅ |
-| Safari | ✅ (unlock() required) |
 
-## Roadmap
-
-- **Phase 3** — MP3 and WAV format support
-- **Phase 4** — Multi-session queue management
+| Browser | Support               |
+| ------- | --------------------- |
+| Chrome  | ✅                     |
+| Firefox | ✅                     |
+| Edge    | ✅                     |
+| Safari  | ✅ (unlock() required) |
 
 ## License
 

@@ -5,36 +5,56 @@
   <title>tts-stream-player demo</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; }
-    input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; margin: 4px 0 12px; border: 1px solid #ccc; border-radius: 4px; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box;
+      margin: 4px 0 12px; border: 1px solid #ccc; border-radius: 4px;
+    }
     button { padding: 12px 24px; font-size: 16px; cursor: pointer; margin: 8px 4px; }
     button:disabled { opacity: 0.4; cursor: default; }
     .result { margin-top: 12px; font-size: 14px; color: #555; min-height: 24px; }
     .time { font-size: 28px; font-weight: bold; margin: 8px 0; }
     .section { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; }
     h2 { margin-top: 0; }
-    label { font-size: 13px; color: #555; }
+    small { font-size: 13px; color: #555; display: block; margin-bottom: 4px; }
+
+    /* Format toggle */
+    .toggle { display: flex; gap: 0; margin: 6px 0 16px; border: 1px solid #ccc; border-radius: 6px; overflow: hidden; width: fit-content; }
+    .toggle label {
+      padding: 8px 20px; font-size: 14px; cursor: pointer; user-select: none;
+      background: #fff; color: #333; transition: background 0.15s, color 0.15s;
+    }
+    .toggle label + label { border-left: 1px solid #ccc; }
+    .toggle input[type=radio] { display: none; }
+    .toggle label:has(input:checked) { background: #0066cc; color: #fff; }
   </style>
 </head>
 <body>
 
-<h1>TTS Streaming comparison</h1>
+<h1>TTS Streaming demo</h1>
 <p>Measures time from button click to first audio playback.</p>
 
 <div class="section">
   <h2>Settings</h2>
-  <label>ElevenLabs API Key</label>
+  <small>ElevenLabs API Key</small>
   <input id="api-key" type="password" placeholder="your-api-key-here"/>
-  <label>Voice ID</label>
+  <small>Voice ID</small>
   <input id="voice-id" type="text" placeholder="your-voice-id-here"/>
-  <label>Text</label>
-  <input id="text" type="text" value="Hello. This is a streaming playback test. I'm comparing the time it takes for the initial audio to start playing." />
+  <small>Text</small>
+  <input id="text" type="text" value="Hello. This is a streaming playback test. I'm measuring the time until the first audio plays."/>
+
+  <small>Format</small>
+  <div class="toggle">
+    <label><input type="radio" name="format" value="pcm" checked> PCM 16 kHz</label>
+    <label><input type="radio" name="format" value="mp3"> MP3 128 kbps</label>
+  </div>
+
   <button id="unlock-btn">▶ Start</button>
   <span id="unlock-status" style="color:#888;font-size:14px;margin-left:8px">Click to initialize audio</span>
 </div>
 
 <div class="section">
   <h2>With streaming</h2>
-  <p>Plays each PCM chunk as it arrives.</p>
+  <p id="stream-desc">Plays each PCM chunk as it arrives.</p>
   <button id="stream-btn" disabled>Play (streaming)</button>
   <div class="result">
     <div class="time" id="stream-time">—</div>
@@ -44,8 +64,8 @@
 
 <div class="section">
   <h2>Without streaming</h2>
-  <p>Waits for full audio before playback.</p>
-  <button id="full-btn" disabled>Play (full)</button>
+  <p id="full-desc">Waits for full PCM audio before playback.</p>
+  <button id="full-btn" disabled>Play (full download)</button>
   <div class="result">
     <div class="time" id="full-time">—</div>
     <div id="full-status"></div>
@@ -55,99 +75,131 @@
 <script type="module">
 import { TTSStreamPlayer } from '../dist/index.mjs'
 
-const player = new TTSStreamPlayer(
-    { sampleRate: 16000 }    // Sampling 16kHz
-)
+// Create one player per format so each has its own AudioContext at the right sample rate
+const players = {
+  pcm: new TTSStreamPlayer({ sampleRate: 16000 }),
+  mp3: new TTSStreamPlayer({ sampleRate: 44100, format: 'mp3' }),
+}
 
+const getFormat  = () => document.querySelector('input[name="format"]:checked').value
 const getSettings = () => ({
-  apiKey: document.getElementById('api-key').value.trim(),
+  apiKey:  document.getElementById('api-key').value.trim(),
   voiceId: document.getElementById('voice-id').value.trim(),
-  text: document.getElementById('text').value.trim(),
+  text:    document.getElementById('text').value.trim(),
+  format:  getFormat(),
 })
 
+const ELEVENLABS_OUTPUT = { pcm: 'pcm_16000', mp3: 'mp3_44100_128' }
+
+// Update description text on format switch
+document.querySelectorAll('input[name="format"]').forEach(el => {
+  el.addEventListener('change', () => {
+    const isPCM = getFormat() === 'pcm'
+    document.getElementById('stream-desc').textContent = isPCM
+      ? 'Plays each PCM chunk as it arrives.'
+      : 'Decodes MP3 frames as they arrive via frame-boundary parsing.'
+    document.getElementById('full-desc').textContent = isPCM
+      ? 'Waits for full PCM audio before playback.'
+      : 'Waits for full MP3 audio before playback.'
+  })
+})
+
+// Unlock both players inside a single user gesture so Safari grants autoplay for both
 document.getElementById('unlock-btn').addEventListener('click', async () => {
-  await player.unlock()
+  await Promise.all([players.pcm.unlock(), players.mp3.unlock()])
   document.getElementById('unlock-status').textContent = '✅ Audio initialized'
-  document.getElementById('stream-btn').disabled = false
-  document.getElementById('full-btn').disabled = false
   document.getElementById('unlock-btn').disabled = true
+  document.getElementById('stream-btn').disabled = false
+  document.getElementById('full-btn').disabled  = false
 })
 
 document.getElementById('stream-btn').addEventListener('click', async () => {
-  const { apiKey, voiceId, text } = getSettings()
-  const btn = document.getElementById('stream-btn')
-  const timeEl = document.getElementById('stream-time')
+  const { apiKey, voiceId, text, format } = getSettings()
+  const btn      = document.getElementById('stream-btn')
+  const timeEl   = document.getElementById('stream-time')
   const statusEl = document.getElementById('stream-status')
 
   btn.disabled = true
-  timeEl.textContent = '...'
+  timeEl.textContent   = '...'
   statusEl.textContent = 'Fetching...'
 
-  const t0 = performance.now()
-
+  const t0  = performance.now()
   const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=pcm_16000`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=${ELEVENLABS_OUTPUT[format]}`,
     {
-      method: 'POST',
+      method:  'POST',
       headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
+      body:    JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
     }
   )
 
-  const session = await player.play(res.body)
-
-  session.on('start', () => {
-    timeEl.textContent = `${Math.round(performance.now() - t0)} ms`
-    statusEl.textContent = '🔊 Playing'
-  })
-  session.on('buffering', () => {
-    console.log("buffering...")
-  })
-  session.on('end', () => {
-    statusEl.textContent = '✅ Done'
+  if (!res.ok) {
+    statusEl.textContent = `Error: ${res.status}`
     btn.disabled = false
-  })
+    return
+  }
+
+  const session = await players[format].play(res.body)
+
+  session
+    .on('start',     () => {
+      timeEl.textContent   = `${Math.round(performance.now() - t0)} ms`
+      statusEl.textContent = '🔊 Playing'
+    })
+    .on('buffering', () => { statusEl.textContent = '⏳ Buffering...' })
+    .on('playing',   () => { statusEl.textContent = '🔊 Playing' })
+    .on('end',       () => {
+      statusEl.textContent = '✅ Done'
+      btn.disabled = false
+    })
 })
 
 document.getElementById('full-btn').addEventListener('click', async () => {
-  const { apiKey, voiceId, text } = getSettings()
-  const btn = document.getElementById('full-btn')
-  const timeEl = document.getElementById('full-time')
+  const { apiKey, voiceId, text, format } = getSettings()
+  const btn      = document.getElementById('full-btn')
+  const timeEl   = document.getElementById('full-time')
   const statusEl = document.getElementById('full-status')
 
   btn.disabled = true
-  timeEl.textContent = '...'
+  timeEl.textContent   = '...'
   statusEl.textContent = 'Fetching (waiting for full audio)...'
 
-  const t0 = performance.now()
-
+  const t0  = performance.now()
   const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_16000`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${ELEVENLABS_OUTPUT[format]}`,
     {
-      method: 'POST',
+      method:  'POST',
       headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
+      body:    JSON.stringify({ text, model_id: 'eleven_flash_v2_5' }),
     }
   )
+
+  if (!res.ok) {
+    statusEl.textContent = `Error: ${res.status}`
+    btn.disabled = false
+    return
+  }
+
   const buf = await res.arrayBuffer()
+  const sampleRate = format === 'pcm' ? 16000 : 44100
+  const ctx = new AudioContext({ sampleRate })
 
-  console.log('Content-Type:', res.headers.get('content-type'))
-  console.log('Status:', res.status)
-  console.log('Byte Length:', buf.byteLength)
-
-  const ctx = new AudioContext({ sampleRate: 16000 })
-  const int16 = new Int16Array(buf)
-  const float32 = new Float32Array(int16.length)
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
-
-  const audioBuf = ctx.createBuffer(1, float32.length, 16000)
-  audioBuf.copyToChannel(float32, 0)
+  let audioBuf
+  if (format === 'pcm') {
+    const int16   = new Int16Array(buf)
+    const float32 = new Float32Array(int16.length)
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+    audioBuf = ctx.createBuffer(1, float32.length, sampleRate)
+    audioBuf.copyToChannel(float32, 0)
+  } else {
+    audioBuf = await ctx.decodeAudioData(buf)
+  }
 
   const src = ctx.createBufferSource()
   src.buffer = audioBuf
   src.connect(ctx.destination)
 
-  timeEl.textContent = `${Math.round(performance.now() - t0)} ms`
+  timeEl.textContent   = `${Math.round(performance.now() - t0)} ms`
   statusEl.textContent = '🔊 Playing'
   src.start()
   src.onended = () => {

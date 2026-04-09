@@ -1,9 +1,11 @@
 import { Session } from './session'
+import type { AudioFormat } from './decoder'
 
 export interface PlayerOptions {
   sampleRate: number
-  channels?: number     // default: 1
+  channels?: number     // default: 1; MP3 では無視 (ストリーム内の値が使われる)
   minBufferMs?: number  // default: 100
+  format?: AudioFormat  // default: 'pcm_16bit'
 }
 
 export class TTSStreamPlayer {
@@ -14,6 +16,7 @@ export class TTSStreamPlayer {
     this.options = {
       channels: 1,
       minBufferMs: 100,
+      format: 'pcm_16bit',
       ...options,
     }
   }
@@ -36,6 +39,7 @@ export class TTSStreamPlayer {
       stream,
       this.options.channels,
       this.options.minBufferMs,
+      this.options.format,
     )
     session.start()
     return session
