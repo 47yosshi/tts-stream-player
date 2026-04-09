@@ -17,6 +17,12 @@ With    tts-stream-player:  wait = TTFB (~100–500ms)
 - **Custom or self-hosted TTS** — your TTS engine doesn't support WebRTC
 - **Cost-conscious teams** — ElevenLabs TTS API is cheaper per minute than Conversational AI; this library gives you streaming playback without paying for WebRTC infrastructure
 
+## Use cases
+- Adding voice responses to an existing web chat or chatbot
+- Campaign pages and interactive demos
+- Accessibility — reading page content or LLM responses aloud
+- Internal tools where a full voice-agent stack is overkill
+
 ## Features
 
 - PCM 16-bit and MP3 streaming playback via Web Audio API
