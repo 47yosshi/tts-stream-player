@@ -127,3 +127,41 @@ export function extractCompleteFrames(data: Uint8Array): {
     remainder: slice(end),
   }
 }
+
+/**
+ * フレームバッファの末尾 n フレームを返す。
+ * ビットリザーバーのオーバーラップコンテキスト用。
+ */
+export function extractTailFrames(data: Uint8Array, n: number): Uint8Array<ArrayBuffer> {
+  const offsets: number[] = []
+  let pos = 0
+  while (pos < data.length) {
+    const size = parseFrameSize(data, pos)
+    if (size === null || pos + size > data.length) break
+    offsets.push(pos)
+    pos += size
+  }
+  if (offsets.length === 0) return new Uint8Array(0)
+  const startPos = offsets[Math.max(0, offsets.length - n)]
+  return new Uint8Array((data.buffer as ArrayBuffer).slice(
+    data.byteOffset + startPos,
+    data.byteOffset + data.byteLength,
+  ))
+}
+
+/**
+ * フレームバッファに含まれる完結フレームの合計 PCM サンプル数を返す。
+ * MPEG1: 1152 samples/frame, MPEG2/2.5: 576 samples/frame
+ */
+export function countFrameSamples(data: Uint8Array): number {
+  let pos = 0
+  let samples = 0
+  while (pos < data.length) {
+    const size = parseFrameSize(data, pos)
+    if (size === null || pos + size > data.length) break
+    const mpegVersionBits = (data[pos + 1] >> 3) & 0x3
+    samples += mpegVersionBits === 3 ? 1152 : 576
+    pos += size
+  }
+  return samples
+}

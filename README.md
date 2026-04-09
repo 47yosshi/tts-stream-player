@@ -1,11 +1,12 @@
 # tts-stream-player
 
 A minimal browser library for streaming TTS audio playback via the Web Audio API.
-
 Bridges the gap between TTS API responses (HTTP using chunked transfer encoding) and the browser speaker.
 
+```
 Without tts-stream-player:  wait = total generation time
 With    tts-stream-player:  wait = TTFB (~100–500ms)
+```
 
 ## Format support
 -  PCM 16-bit

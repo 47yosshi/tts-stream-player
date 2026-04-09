@@ -1,4 +1,4 @@
-import { decodePCM, extractCompleteFrames, type AudioFormat } from './decoder'
+import { decodePCM, extractCompleteFrames, extractTailFrames, countFrameSamples, type AudioFormat } from './decoder'
 import { Scheduler } from './scheduler'
 import { BufferQueue } from './queue'
 
@@ -70,47 +70,55 @@ export class Session {
   private async produceLoopMP3(): Promise<void> {
     const reader = this.stream.getReader()
     let accumulated = new Uint8Array(0)
+    // 前バッチ末尾フレーム: MP3 ビットリザーバーのコンテキストとして次バッチに付与する
+    let overlapFrames: Uint8Array<ArrayBuffer> | null = null
+    let overlapSamples = 0
+
+    const decodeAndQueue = async (framesData: Uint8Array<ArrayBuffer>): Promise<void> => {
+      // オーバーラップフレームを先頭に付与してデコード
+      const input = overlapFrames ? concat(overlapFrames, framesData) : framesData
+      const skipSamples = overlapSamples
+
+      // 次バッチ用にオーバーラップを更新 (await より前に確定)
+      overlapFrames = extractTailFrames(framesData, MP3_OVERLAP_FRAMES)
+      overlapSamples = countFrameSamples(overlapFrames)
+
+      const arrayBuffer = (input.buffer as ArrayBuffer).slice(
+        input.byteOffset,
+        input.byteOffset + input.byteLength,
+      )
+      const raw = await this.ctx.decodeAudioData(arrayBuffer)
+      // オーバーラップ分 (前バッチのコンテキスト音声) を先頭からカット
+      const buf = skipSamples > 0 ? trimAudioBuffer(raw, skipSamples, this.ctx) : raw
+      if (!this.aborted && buf !== null) this.queue.push(buf)
+    }
 
     try {
       while (!this.aborted) {
         const { value, done } = await reader.read()
-
-        if (value) {
-          accumulated = concat(accumulated, value)
-        }
+        if (value) accumulated = concat(accumulated, value)
 
         const { framesData, remainder } = extractCompleteFrames(accumulated)
         accumulated = remainder
 
         if (framesData) {
-          // decodeAudioData はバッファを neuterize するため slice でコピーを渡す
-          const arrayBuffer = (framesData.buffer as ArrayBuffer).slice(
-            framesData.byteOffset,
-            framesData.byteOffset + framesData.byteLength,
-          )
-          try {
-            const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer)
-            if (!this.aborted) this.queue.push(audioBuffer)
-          } catch {
-            // 無効データは無視して続行
-          }
+          try { await decodeAndQueue(framesData) } catch { /* 無効データは無視して続行 */ }
         }
 
         if (done) break
       }
 
-      // ストリーム終端: 残留バイトをフラッシュ
+      // ストリーム終端: 残留バイトをフラッシュ (通常はほぼ空)
       if (!this.aborted && accumulated.byteLength > 0) {
         const arrayBuffer = (accumulated.buffer as ArrayBuffer).slice(
           accumulated.byteOffset,
           accumulated.byteOffset + accumulated.byteLength,
         )
         try {
-          const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer)
-          this.queue.push(audioBuffer)
-        } catch {
-          // 無視
-        }
+          const raw = await this.ctx.decodeAudioData(arrayBuffer)
+          const buf = overlapSamples > 0 ? trimAudioBuffer(raw, overlapSamples, this.ctx) : raw
+          if (buf !== null) this.queue.push(buf)
+        } catch { /* 無視 */ }
       }
     } finally {
       reader.releaseLock()
@@ -151,6 +159,25 @@ export class Session {
 
     this.handlers.get('end')?.()
   }
+}
+
+// ビットリザーバーをカバーするために前バッチから引き継ぐフレーム数。
+// 128kbps では最大 ~6 フレーム分のリザーバーが必要。16 で余裕を持たせる。
+const MP3_OVERLAP_FRAMES = 16
+
+/**
+ * AudioBuffer の先頭 samples サンプルを除いた新しい AudioBuffer を返す。
+ * samples >= buf.length の場合は null。
+ */
+function trimAudioBuffer(buf: AudioBuffer, samples: number, ctx: AudioContext): AudioBuffer | null {
+  const skip = Math.min(samples, buf.length)
+  const newLength = buf.length - skip
+  if (newLength <= 0) return null
+  const out = ctx.createBuffer(buf.numberOfChannels, newLength, buf.sampleRate)
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    out.copyToChannel(buf.getChannelData(c).subarray(skip), c)
+  }
+  return out
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
