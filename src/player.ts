@@ -3,7 +3,7 @@ import type { AudioFormat } from './decoder'
 
 export interface PlayerOptions {
   sampleRate: number
-  channels?: number     // default: 1; MP3 では無視 (ストリーム内の値が使われる)
+  channels?: number     // default: 1; MP3/WAV では無視 (ストリーム内の値が使われる)
   minBufferMs?: number  // default: 100
   format?: AudioFormat  // default: 'pcm_16bit'
 }

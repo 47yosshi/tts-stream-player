@@ -1,4 +1,70 @@
-export type AudioFormat = 'pcm_16bit' | 'mp3'
+export type AudioFormat = 'pcm_16bit' | 'mp3' | 'wav'
+
+// ---- WAV ヘッダー解析 ----
+
+/** WAV ヘッダーのパースに必要な最小バイト数（標準 PCM WAV の場合）*/
+export const WAV_HEADER_MIN_SIZE = 44
+
+export interface WavHeader {
+  channels: number
+  sampleRate: number
+  bitsPerSample: number
+  /** PCM データが始まるバイトオフセット（"data" チャンクヘッダーの直後）*/
+  dataOffset: number
+}
+
+/**
+ * バイト列から WAV ヘッダーを解析する。
+ *
+ * - RIFF/WAVE マジックがない場合は null を返す（WAV ファイルでない）
+ * - RIFF/WAVE だが PCM 16-bit 以外のフォーマットはエラーをスローする
+ * - "data" チャンクがバッファ内に見つからない場合は null を返す
+ */
+export function parseWavHeader(data: Uint8Array): WavHeader | null {
+  if (data.byteLength < 12) return null
+  // "RIFF" magic
+  if (data[0] !== 0x52 || data[1] !== 0x49 || data[2] !== 0x46 || data[3] !== 0x46) return null
+  // "WAVE" format
+  if (data[8] !== 0x57 || data[9] !== 0x41 || data[10] !== 0x56 || data[11] !== 0x45) return null
+
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  let offset = 12
+  let channels = 0
+  let sampleRate = 0
+  let bitsPerSample = 0
+  let dataOffset = -1
+
+  while (offset + 8 <= data.byteLength) {
+    const id = String.fromCharCode(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+    const size = view.getUint32(offset + 4, true)  // little-endian
+    const contentStart = offset + 8
+
+    if (id === 'fmt ') {
+      if (contentStart + 16 > data.byteLength) return null  // fmt チャンクが截断されている
+      const audioFormat = view.getUint16(contentStart, true)
+      if (audioFormat !== 1) {
+        throw new Error(`WAV error: unsupported audio format ${audioFormat} (only PCM=1 is supported)`)
+      }
+      channels = view.getUint16(contentStart + 2, true)
+      sampleRate = view.getUint32(contentStart + 4, true)
+      bitsPerSample = view.getUint16(contentStart + 14, true)
+      if (bitsPerSample !== 16) {
+        throw new Error(`WAV error: unsupported bit depth ${bitsPerSample} (only 16-bit is supported)`)
+      }
+    } else if (id === 'data') {
+      dataOffset = contentStart
+      break
+    }
+
+    // WAV チャンクはバイト境界 (偶数) にパディングされる
+    offset = contentStart + size + (size & 1)
+  }
+
+  if (dataOffset === -1 || channels === 0 || sampleRate === 0) return null
+  return { channels, sampleRate, bitsPerSample, dataOffset }
+}
+
+// ---- PCM デコード ----
 
 export function decodePCM(chunk: Uint8Array): Float32Array<ArrayBuffer> {
   // 16bit符号付き整数 → Float32 (-1.0 〜 1.0) に変換

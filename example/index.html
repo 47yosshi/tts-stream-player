@@ -46,6 +46,7 @@
   <div class="toggle">
     <label><input type="radio" name="format" value="pcm" checked> PCM 16 kHz</label>
     <label><input type="radio" name="format" value="mp3"> MP3 128 kbps</label>
+    <label><input type="radio" name="format" value="wav"> WAV 16 kHz</label>
   </div>
 
   <button id="unlock-btn">▶ Start</button>
@@ -79,6 +80,7 @@ import { TTSStreamPlayer } from '../dist/index.mjs'
 const players = {
   pcm: new TTSStreamPlayer({ sampleRate: 16000 }),
   mp3: new TTSStreamPlayer({ sampleRate: 44100, format: 'mp3' }),
+  wav: new TTSStreamPlayer({ sampleRate: 16000, format: 'wav' }),
 }
 
 const getFormat  = () => document.querySelector('input[name="format"]:checked').value
@@ -89,24 +91,66 @@ const getSettings = () => ({
   format:  getFormat(),
 })
 
-const ELEVENLABS_OUTPUT = { pcm: 'pcm_16000', mp3: 'mp3_44100_128' }
+const ELEVENLABS_OUTPUT = { pcm: 'pcm_16000', mp3: 'mp3_44100_128', wav: 'pcm_16000' }
+const SAMPLE_RATES = { pcm: 16000, mp3: 44100, wav: 16000 }
+
+/**
+ * 44バイトの WAV ヘッダーを生成する。
+ * dataSize に 0xFFFFFFFF を渡すとストリーミング用の「サイズ未知」ヘッダーになる。
+ */
+function buildWavHeader(sampleRate, channels, bitsPerSample, dataSize) {
+  const buf = new ArrayBuffer(44)
+  const v = new DataView(buf)
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)))
+  str(0, 'RIFF'); v.setUint32(4, dataSize === 0xFFFFFFFF ? 0xFFFFFFFF : 36 + dataSize, true)
+  str(8, 'WAVE'); str(12, 'fmt ')
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true)
+  v.setUint16(22, channels, true); v.setUint32(24, sampleRate, true)
+  v.setUint32(28, sampleRate * channels * bitsPerSample / 8, true)
+  v.setUint16(32, channels * bitsPerSample / 8, true); v.setUint16(34, bitsPerSample, true)
+  str(36, 'data'); v.setUint32(40, dataSize, true)
+  return buf
+}
+
+/**
+ * ReadableStream<Uint8Array> の先頭に WAV ヘッダーを付与する TransformStream。
+ * ElevenLabs の PCM ストリームを WAV ストリームに見せかけるために使う。
+ */
+function prependWavHeader(sampleRate, channels = 1, bitsPerSample = 16) {
+  let sent = false
+  return new TransformStream({
+    transform(chunk, controller) {
+      if (!sent) {
+        controller.enqueue(new Uint8Array(buildWavHeader(sampleRate, channels, bitsPerSample, 0xFFFFFFFF)))
+        sent = true
+      }
+      controller.enqueue(chunk)
+    }
+  })
+}
 
 // Update description text on format switch
+const STREAM_DESCS = {
+  pcm: 'Plays each PCM chunk as it arrives.',
+  mp3: 'Decodes MP3 frames as they arrive via frame-boundary parsing.',
+  wav: 'Prepends a RIFF header to the PCM stream, then plays via the WAV pipeline.',
+}
+const FULL_DESCS = {
+  pcm: 'Waits for full PCM audio before playback.',
+  mp3: 'Waits for full MP3 audio before playback.',
+  wav: 'Waits for full WAV audio before playback.',
+}
 document.querySelectorAll('input[name="format"]').forEach(el => {
   el.addEventListener('change', () => {
-    const isPCM = getFormat() === 'pcm'
-    document.getElementById('stream-desc').textContent = isPCM
-      ? 'Plays each PCM chunk as it arrives.'
-      : 'Decodes MP3 frames as they arrive via frame-boundary parsing.'
-    document.getElementById('full-desc').textContent = isPCM
-      ? 'Waits for full PCM audio before playback.'
-      : 'Waits for full MP3 audio before playback.'
+    const fmt = getFormat()
+    document.getElementById('stream-desc').textContent = STREAM_DESCS[fmt]
+    document.getElementById('full-desc').textContent   = FULL_DESCS[fmt]
   })
 })
 
-// Unlock both players inside a single user gesture so Safari grants autoplay for both
+// Unlock all players inside a single user gesture so Safari grants autoplay for all
 document.getElementById('unlock-btn').addEventListener('click', async () => {
-  await Promise.all([players.pcm.unlock(), players.mp3.unlock()])
+  await Promise.all([players.pcm.unlock(), players.mp3.unlock(), players.wav.unlock()])
   document.getElementById('unlock-status').textContent = '✅ Audio initialized'
   document.getElementById('unlock-btn').disabled = true
   document.getElementById('stream-btn').disabled = false
@@ -139,7 +183,11 @@ document.getElementById('stream-btn').addEventListener('click', async () => {
     return
   }
 
-  const session = await players[format].play(res.body)
+  // WAV: PCM ストリームの先頭に RIFF ヘッダーを付与してから WAV プレイヤーへ渡す
+  const stream = format === 'wav'
+    ? res.body.pipeThrough(prependWavHeader(SAMPLE_RATES.wav))
+    : res.body
+  const session = await players[format].play(stream)
 
   session
     .on('start',     () => {
@@ -181,7 +229,7 @@ document.getElementById('full-btn').addEventListener('click', async () => {
   }
 
   const buf = await res.arrayBuffer()
-  const sampleRate = format === 'pcm' ? 16000 : 44100
+  const sampleRate = SAMPLE_RATES[format]
   const ctx = new AudioContext({ sampleRate })
 
   let audioBuf
@@ -191,6 +239,13 @@ document.getElementById('full-btn').addEventListener('click', async () => {
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
     audioBuf = ctx.createBuffer(1, float32.length, sampleRate)
     audioBuf.copyToChannel(float32, 0)
+  } else if (format === 'wav') {
+    // PCM バイト列に WAV ヘッダーを付与して decodeAudioData に渡す
+    const header  = buildWavHeader(sampleRate, 1, 16, buf.byteLength)
+    const wavBuf  = new Uint8Array(44 + buf.byteLength)
+    wavBuf.set(new Uint8Array(header), 0)
+    wavBuf.set(new Uint8Array(buf), 44)
+    audioBuf = await ctx.decodeAudioData(wavBuf.buffer)
   } else {
     audioBuf = await ctx.decodeAudioData(buf)
   }

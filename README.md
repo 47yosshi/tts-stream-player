@@ -11,6 +11,7 @@ With    tts-stream-player:  wait = TTFB (~100–500ms)
 ## Format support
 -  PCM 16-bit
 -  MP3
+-  WAV (RIFF/PCM 16-bit)
 
 ## Who is this for
 - **Separate LLM and TTS** — you own the full pipeline (your LLM, your RAG, your prompt logic) and just want HTTP streaming playback in the browser
@@ -25,7 +26,7 @@ With    tts-stream-player:  wait = TTFB (~100–500ms)
 
 ## Features
 
-- PCM 16-bit and MP3 streaming playback via Web Audio API
+- PCM 16-bit, MP3, and WAV streaming playback via Web Audio API
 - Seamless chunk scheduling (no gaps between chunks)
 - Time-based buffer queue for absorbing network jitter
 - Underflow recovery — automatically rebuffers and resumes after network stalls
@@ -83,9 +84,9 @@ micButton.addEventListener('click', () => {
 | Option        | Type                  | Required | Description                                                                                                       |
 | ------------- | --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
 | `sampleRate`  | `number`              | yes      | Sample rate for the `AudioContext`. For PCM, must match the stream. For MP3, the browser resamples automatically. |
-| `channels`    | `number`              | no       | Number of channels. Default: `1`. Ignored for MP3 (taken from the stream).                                        |
-| `minBufferMs` | `number`              | no       | Milliseconds of audio to buffer before playback starts (and before resuming after underflow). Default: `100`      |
-| `format`      | `'pcm_16bit' | 'mp3'` | no       | Audio format of the stream. Default: `'pcm_16bit'`                                                                |
+| `channels`    | `number`                       | no       | Number of channels. Default: `1`. Ignored for MP3 and WAV (taken from the stream).                                |
+| `minBufferMs` | `number`                       | no       | Milliseconds of audio to buffer before playback starts (and before resuming after underflow). Default: `100`      |
+| `format`      | `'pcm_16bit' \| 'mp3' \| 'wav'` | no       | Audio format of the stream. Default: `'pcm_16bit'`                                                                |
 
 
 ### `player.unlock(): Promise<void>`
@@ -154,6 +155,34 @@ await player.play(response.body)
 ```
 
 > **Note:** Because `decodeAudioData` is called per frame batch, there may be a brief encoder-delay gap (~13 ms) at each batch boundary. For seamless MP3 streaming a WASM decoder (e.g. minimp3) is needed; this implementation keeps zero dependencies.
+
+### WAV
+
+Supports **RIFF/WAV PCM 16-bit** streams. The WAV header is parsed automatically to extract the sample rate and channel count — you do not need to set `channels` or match `sampleRate` to the stream.
+
+Three streaming patterns are handled transparently:
+
+- **Full WAV file** — a single RIFF header at the start, followed by raw PCM bytes.
+- **Per-chunk headers** — each chunk carries its own RIFF header (e.g. when a proxy re-wraps every PCM chunk). Headers are stripped per chunk.
+- **Headerless PCM** — if no RIFF magic is found in the first 44 bytes the data is treated as raw PCM 16-bit, using the constructor's `sampleRate` and `channels`.
+
+Multi-channel audio is supported; interleaved samples are deinterleaved automatically.
+
+```typescript
+// ElevenLabs example — pipe PCM through a WAV header transform
+const response = await fetch('https://api.elevenlabs.io/v1/text-to-speech/{id}/stream?output_format=pcm_16000', {
+  method: 'POST',
+  headers: { 'xi-api-key': API_KEY, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ text: 'Hello.', model_id: 'eleven_flash_v2_5' }),
+})
+
+// Prepend a RIFF header so the stream is treated as WAV
+const wavStream = response.body.pipeThrough(prependWavHeader(16000))
+
+const player = new TTSStreamPlayer({ sampleRate: 16000, format: 'wav' })
+await player.unlock()
+await player.play(wavStream)
+```
 
 ## Browser support
 

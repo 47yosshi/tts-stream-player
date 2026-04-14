@@ -1,4 +1,4 @@
-import { decodePCM, extractCompleteFrames, extractTailFrames, countFrameSamples, type AudioFormat } from './decoder'
+import { decodePCM, extractCompleteFrames, extractTailFrames, countFrameSamples, parseWavHeader, WAV_HEADER_MIN_SIZE, type AudioFormat } from './decoder'
 import { Scheduler } from './scheduler'
 import { BufferQueue } from './queue'
 
@@ -35,7 +35,11 @@ export class Session {
   }
 
   async start(): Promise<void> {
-    const produce = this.format === 'mp3' ? this.produceLoopMP3() : this.produceLoopPCM()
+    const produce = this.format === 'mp3'
+      ? this.produceLoopMP3()
+      : this.format === 'wav'
+      ? this.produceLoopWAV()
+      : this.produceLoopPCM()
     await Promise.all([produce, this.consumeLoop()])
   }
 
@@ -60,6 +64,87 @@ export class Session {
         const buf = this.ctx.createBuffer(this.channels, float32.length, this.ctx.sampleRate)
         buf.copyToChannel(float32, 0)
         this.queue.push(buf)
+      }
+    } finally {
+      reader.releaseLock()
+      this.queue.close()
+    }
+  }
+
+  private async produceLoopWAV(): Promise<void> {
+    const reader = this.stream.getReader()
+    let accumulated = new Uint8Array(0)
+    let headerParsed = false
+    let wavChannels = this.channels
+    let wavSampleRate = this.ctx.sampleRate
+    let remainder: Uint8Array | null = null
+
+    // WAV PCM をデコードしてキューに積む。
+    // チャンネル数に応じてインターリーブ解除を行う。
+    const processPCM = (data: Uint8Array): void => {
+      const chunk = remainder ? concat(remainder, data) : data
+      const frameBytes = wavChannels * 2  // 16-bit × channels
+      const alignedLen = chunk.byteLength - (chunk.byteLength % frameBytes)
+      remainder = alignedLen < chunk.byteLength ? chunk.subarray(alignedLen) : null
+      const aligned = chunk.subarray(0, alignedLen)
+      if (aligned.byteLength === 0) return
+
+      const float32 = decodePCM(aligned)
+      const samplesPerChannel = float32.length / wavChannels
+      const buf = this.ctx.createBuffer(wavChannels, samplesPerChannel, wavSampleRate)
+      if (wavChannels === 1) {
+        buf.copyToChannel(float32, 0)
+      } else {
+        // インターリーブ PCM (L0,R0,L1,R1,...) → チャンネルごとに分離
+        for (let c = 0; c < wavChannels; c++) {
+          const ch = new Float32Array(samplesPerChannel)
+          for (let i = 0; i < samplesPerChannel; i++) ch[i] = float32[i * wavChannels + c]
+          buf.copyToChannel(ch, c)
+        }
+      }
+      this.queue.push(buf)
+    }
+
+    // チャンクが RIFF WAV ヘッダーで始まる場合はヘッダーをスキップして PCM 部分を返す。
+    // そうでなければそのまま返す。
+    const stripWavHeader = (chunk: Uint8Array): Uint8Array => {
+      if (chunk.byteLength >= WAV_HEADER_MIN_SIZE) {
+        const parsed = parseWavHeader(chunk)  // 非対応フォーマットはスロー
+        if (parsed !== null) return chunk.subarray(parsed.dataOffset)
+      }
+      return chunk
+    }
+
+    try {
+      while (!this.aborted) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        if (!headerParsed) {
+          // チャンク境界でヘッダーが分断される可能性があるため 44 バイト溜まるまで蓄積
+          accumulated = concat(accumulated, value)
+          if (accumulated.byteLength < WAV_HEADER_MIN_SIZE) continue
+
+          if (accumulated[0] === 0x52 && accumulated[1] === 0x49 &&
+              accumulated[2] === 0x46 && accumulated[3] === 0x46) {
+            // "RIFF" マジック検出 → WAV ヘッダーとして解析
+            const parsed = parseWavHeader(accumulated)  // 非対応フォーマットはスロー
+            if (parsed === null) throw new Error('WAV error: "data" chunk not found in header')
+            wavChannels = parsed.channels
+            wavSampleRate = parsed.sampleRate
+            headerParsed = true
+            const pcm = accumulated.subarray(parsed.dataOffset)
+            if (pcm.byteLength > 0) processPCM(pcm)
+          } else {
+            // RIFF マジックなし → ヘッダーなし PCM として扱う
+            headerParsed = true
+            processPCM(accumulated)
+          }
+          continue
+        }
+
+        // 毎チャンクに WAV ヘッダーが付くケース: RIFF マジックがあればヘッダーをスキップ
+        processPCM(stripWavHeader(value))
       }
     } finally {
       reader.releaseLock()

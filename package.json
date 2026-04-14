@@ -1,6 +1,6 @@
 {
     "name": "tts-stream-player",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "description": "Streaming TTS audio playback for the browser via Web Audio API",
     "license": "MIT",
     "main": "dist/index.cjs",
